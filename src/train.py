@@ -4,12 +4,15 @@ for bank consumer churn prediction.
 """
 
 import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from sklearn.utils import resample
 from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.compose import make_column_transformer
-from sklearn.preprocessing import OneHotEncoder,  StandardScaler
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.metrics import (
     accuracy_score,
     precision_score,
@@ -22,6 +25,8 @@ from sklearn.metrics import (
 import mlflow
 import mlflow.sklearn
 from mlflow.models import infer_signature
+from mlflow.tracking import MlflowClient
+
 
 def rebalance(data):
     """
@@ -97,7 +102,7 @@ def preprocess(df):
         X, y, test_size=0.3, random_state=1912
     )
     col_transf = make_column_transformer(
-        (StandardScaler(), num_cols), 
+        (StandardScaler(), num_cols),
         (OneHotEncoder(handle_unknown="ignore", drop="first"), cat_cols),
         remainder="passthrough",
     )
@@ -113,43 +118,38 @@ def preprocess(df):
     return col_transf, X_train, X_test, y_train, y_test
 
 
-def train(X_train, y_train):
+def train(model, X_train, y_train):
     """
-    Train a logistic regression model.
+    Train a given sklearn model.
 
     Args:
+        model: sklearn estimator
         X_train (pd.DataFrame): DataFrame with features
         y_train (pd.Series): Series with target
 
     Returns:
-        LogisticRegression: trained logistic regression model
+        trained sklearn estimator
     """
-    log_reg = LogisticRegression(max_iter=1000)
-    log_reg.fit(X_train, y_train)
+    model.fit(X_train, y_train)
 
-    signature = infer_signature(X_train, log_reg.predict(X_train))
-    mlflow.sklearn.log_model(log_reg, artifact_path="model", signature=signature)
+    signature = infer_signature(X_train, model.predict(X_train))
+    mlflow.sklearn.log_model(model, artifact_path="model", signature=signature)
 
     mlflow.log_input(mlflow.data.from_pandas(X_train), context="training")
 
-    return log_reg
+    return model
 
 
-def main():
-    mlflow.set_tracking_uri("http://localhost:5000")
-
-    mlflow.set_experiment("churn-prediction")
-
-    with mlflow.start_run():
-
-        df = pd.read_csv("Churn_Modelling.csv")
+def run_experiment(df, model, params, model_type):
+    """Run a single MLflow experiment for a given model configuration."""
+    with mlflow.start_run(run_name=model_type) as run:
         col_transf, X_train, X_test, y_train, y_test = preprocess(df)
 
-        mlflow.log_param("max_iter", 1000)
+        mlflow.log_params(params)
 
-        model = train(X_train, y_train)
+        trained_model = train(model, X_train, y_train)
 
-        y_pred = model.predict(X_test)
+        y_pred = trained_model.predict(X_test)
 
         mlflow.log_metrics({
             "accuracy": accuracy_score(y_test, y_pred),
@@ -158,18 +158,102 @@ def main():
             "f1": f1_score(y_test, y_pred),
         })
 
-        mlflow.set_tag("model_type", "LogisticRegression")
+        mlflow.set_tag("model_type", model_type)
 
-        conf_mat = confusion_matrix(y_test, y_pred, labels=model.classes_)
+        conf_mat = confusion_matrix(y_test, y_pred, labels=trained_model.classes_)
         conf_mat_disp = ConfusionMatrixDisplay(
-            confusion_matrix=conf_mat, display_labels=model.classes_
+            confusion_matrix=conf_mat, display_labels=trained_model.classes_
         )
         conf_mat_disp.plot()
-
+        plt.title(f"Confusion Matrix — {model_type}")
         plt.savefig("confusion_matrix.png")
         mlflow.log_artifact("confusion_matrix.png")
+        plt.close()
 
-        plt.show()
+        return run.info.run_id
+
+
+def main():
+    mlflow.set_tracking_uri("http://localhost:5000")
+    mlflow.set_experiment("churn-prediction")
+
+    df = pd.read_csv("Churn_Modelling.csv")
+
+    experiments = [
+        (
+            LogisticRegression(max_iter=1000, C=1.0, solver="lbfgs"),
+            {"max_iter": 1000, "C": 1.0, "solver": "lbfgs"},
+            "LogisticRegression",
+        ),
+        (
+            RandomForestClassifier(n_estimators=200, max_depth=10, random_state=42),
+            {"n_estimators": 200, "max_depth": 10, "random_state": 42},
+            "RandomForest",
+        ),
+        (
+            GradientBoostingClassifier(
+                n_estimators=100, learning_rate=0.1, max_depth=3, random_state=42
+            ),
+            {"n_estimators": 100, "learning_rate": 0.1, "max_depth": 3, "random_state": 42},
+            "GradientBoosting",
+        ),
+    ]
+
+    run_ids = {}
+    for model, params, model_type in experiments:
+        print(f"\n>>> Running experiment: {model_type}")
+        run_id = run_experiment(df, model, params, model_type)
+        run_ids[model_type] = run_id
+        print(f"    Run ID: {run_id}")
+
+    client = MlflowClient()
+    experiment = client.get_experiment_by_name("churn-prediction")
+
+    runs = client.search_runs(
+        experiment_ids=[experiment.experiment_id],
+        order_by=["metrics.f1 DESC"],
+    )
+
+    print("\n=== Experiment Results (sorted by F1) ===")
+    for r in runs:
+        m = r.data.metrics
+        print(
+            f"  {r.data.tags.get('model_type', 'unknown'):25s} | "
+            f"F1={m.get('f1', 0):.4f}  "
+            f"Recall={m.get('recall', 0):.4f}  "
+            f"Precision={m.get('precision', 0):.4f}  "
+            f"Accuracy={m.get('accuracy', 0):.4f}"
+        )
+
+    best_run = runs[0]
+    second_run = runs[1]
+    best_model_type = best_run.data.tags.get("model_type", "unknown")
+    second_model_type = second_run.data.tags.get("model_type", "unknown")
+
+    model_name = "churn-classifier"
+
+    best_model_uri = f"runs:/{best_run.info.run_id}/model"
+    second_model_uri = f"runs:/{second_run.info.run_id}/model"
+
+    best_mv = mlflow.register_model(best_model_uri, model_name)
+    second_mv = mlflow.register_model(second_model_uri, model_name)
+
+    client.transition_model_version_stage(
+        name=model_name, version=best_mv.version, stage="Production"
+    )
+    client.transition_model_version_stage(
+        name=model_name, version=second_mv.version, stage="Staging"
+    )
+
+    print(f"\n=== Model Registration ===")
+    print(f"  PRODUCTION  v{best_mv.version}: {best_model_type}")
+    print(
+        f"Highest F1={best_run.data.metrics.get('f1', 0):.4f} and "
+        f"Recall={best_run.data.metrics.get('recall', 0):.4f}. ")
+    print(f"\n  STAGING     v{second_mv.version}: {second_model_type}")
+    print(
+        f"Second-best F1={second_run.data.metrics.get('f1', 0):.4f}. "
+        "Strong candidate for promotion after further validation on held-out")
 
 
 if __name__ == "__main__":
