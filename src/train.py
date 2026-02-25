@@ -19,7 +19,9 @@ from sklearn.metrics import (
     ConfusionMatrixDisplay,
 )
 
-### Import MLflow
+import mlflow
+import mlflow.sklearn
+from mlflow.models import infer_signature
 
 def rebalance(data):
     """
@@ -106,7 +108,7 @@ def preprocess(df):
     X_test = col_transf.transform(X_test)
     X_test = pd.DataFrame(X_test, columns=col_transf.get_feature_names_out())
 
-    # Log the transformer as an artifact
+    mlflow.sklearn.log_model(col_transf, artifact_path="column_transformer")
 
     return col_transf, X_train, X_test, y_train, y_test
 
@@ -125,50 +127,49 @@ def train(X_train, y_train):
     log_reg = LogisticRegression(max_iter=1000)
     log_reg.fit(X_train, y_train)
 
-    ### Log the model with the input and output schema
-    # Infer signature (input and output schema)
+    signature = infer_signature(X_train, log_reg.predict(X_train))
+    mlflow.sklearn.log_model(log_reg, artifact_path="model", signature=signature)
 
-    # Log model
-
-    ### Log the data
+    mlflow.log_input(mlflow.data.from_pandas(X_train), context="training")
 
     return log_reg
 
 
 def main():
-    ### Set the tracking URI for MLflow
+    mlflow.set_tracking_uri("http://localhost:5000")
 
-    ### Set the experiment name
+    mlflow.set_experiment("churn-prediction")
 
+    with mlflow.start_run():
 
-    ### Start a new run and leave all the main function code as part of the experiment
+        df = pd.read_csv("Churn_Modelling.csv")
+        col_transf, X_train, X_test, y_train, y_test = preprocess(df)
 
-    df = pd.read_csv("data/Churn_Modelling.csv")
-    col_transf, X_train, X_test, y_train, y_test = preprocess(df)
+        mlflow.log_param("max_iter", 1000)
 
-    ### Log the max_iter parameter
+        model = train(X_train, y_train)
 
-    model = train(X_train, y_train)
+        y_pred = model.predict(X_test)
 
-    
-    y_pred = model.predict(X_test)
+        mlflow.log_metrics({
+            "accuracy": accuracy_score(y_test, y_pred),
+            "precision": precision_score(y_test, y_pred),
+            "recall": recall_score(y_test, y_pred),
+            "f1": f1_score(y_test, y_pred),
+        })
 
-    ### Log metrics after calculating them
+        mlflow.set_tag("model_type", "LogisticRegression")
 
+        conf_mat = confusion_matrix(y_test, y_pred, labels=model.classes_)
+        conf_mat_disp = ConfusionMatrixDisplay(
+            confusion_matrix=conf_mat, display_labels=model.classes_
+        )
+        conf_mat_disp.plot()
 
-    ### Log tag
+        plt.savefig("confusion_matrix.png")
+        mlflow.log_artifact("confusion_matrix.png")
 
-
-    
-    conf_mat = confusion_matrix(y_test, y_pred, labels=model.classes_)
-    conf_mat_disp = ConfusionMatrixDisplay(
-        confusion_matrix=conf_mat, display_labels=model.classes_
-    )
-    conf_mat_disp.plot()
-    
-    # Log the image as an artifact in MLflow
-    
-    plt.show()
+        plt.show()
 
 
 if __name__ == "__main__":
