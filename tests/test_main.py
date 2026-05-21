@@ -6,6 +6,7 @@ Run with:
     pytest tests/ -v --cov=app --cov=main --cov-report=term-missing
 """
 
+import pytest
 from litestar.testing import TestClient
 
 from app.model_utils import predict_churn
@@ -38,6 +39,12 @@ def test_predict_churn_edge_high_risk():
     # older, inactive, low balance — a high churn-risk profile
     result = predict_churn([400, "Germany", "Male", 70, 1, 0.0, 1, 0, 0, 20000.0])
     assert result in (0, 1)
+
+
+def test_predict_churn_raises_on_wrong_feature_count():
+    # too few features — pipeline must raise (ColumnTransformer rejects shape)
+    with pytest.raises(Exception):
+        predict_churn([650, "France", "Female"])
 
 
 # ---------------------------------------------------------------------------
