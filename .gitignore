@@ -210,6 +210,7 @@ tempCodeRunnerFile.py
 
 # PyPI configuration file
 .pypirc
+<<<<<<< HEAD
 
 # Marimo
 marimo/_static/
@@ -218,3 +219,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+=======
+confusion_matrix.png
+>>>>>>> d9c210a (Ignore generated plot files)
