@@ -210,8 +210,6 @@ tempCodeRunnerFile.py
 
 # PyPI configuration file
 .pypirc
-<<<<<<< HEAD
-
 # Marimo
 marimo/_static/
 marimo/_lsp/
@@ -219,6 +217,22 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
-=======
+
+# Generated plots
 confusion_matrix.png
->>>>>>> d9c210a (Ignore generated plot files)
+
+# Claude Code
+.claude/
+CLAUDE.md
+.claude.json
+
+# MLflow local artifacts (model.joblib in data/ is what's served)
+mlartifacts/
+mlruns/
+mlflow.db
+
+# Stray local junk
+pd
+plt
+"pd\r"
+"plt\r"
