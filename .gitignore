@@ -236,3 +236,16 @@ pd
 plt
 "pd\r"
 "plt\r"
+
+# SSH keys and credentials — NEVER commit
+*.pem
+*.key
+*.crt
+id_rsa
+id_ed25519
+credentials
+.aws/
+
+# Pasted / scratch files
+Pasted*.png
+Pasted*.jpg
