@@ -3,144 +3,49 @@ name: CI/CD - Churn Prediction API
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
-  workflow_dispatch:
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  REGISTRY: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com
+  IMAGE: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com/${{ vars.ECR_REPOSITORY }}:latest
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # 1. Test stage — lint + pytest with coverage gate (pre-build validation)
-  # ---------------------------------------------------------------------------
   test:
-    name: Lint & Test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - run: uv sync --frozen
+      - run: uv run ruff check .
+      - run: uv run pytest tests/ --cov=app --cov=main --cov-fail-under=70
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v3
-        with:
-          version: "0.5.11"
-          enable-cache: true
-
-      - name: Set up Python
-        run: uv python install 3.12
-
-      - name: Install dependencies
-        run: uv sync --frozen
-
-      - name: Ruff lint
-        run: uv run ruff check .
-
-      - name: Ruff format check
-        run: uv run ruff format --check .
-
-      - name: Run pytest with coverage
-        run: uv run pytest tests/ -v --cov=app --cov=main --cov-report=term-missing --cov-fail-under=70
-
-  # ---------------------------------------------------------------------------
-  # 2. Build & push image to Amazon ECR
-  # ---------------------------------------------------------------------------
   build-and-push:
-    name: Build & Push Image
-    runs-on: ubuntu-latest
     needs: test
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    outputs:
-      image: ${{ steps.image.outputs.uri }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ vars.AWS_REGION }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: aws-actions/amazon-ecr-login@v2
+      - run: docker build -t "$IMAGE" . && docker push "$IMAGE"
 
-      - name: Ensure ECR repository exists
-        run: |
-          aws ecr describe-repositories \
-            --repository-names "${{ vars.ECR_REPOSITORY }}" \
-            --region "${{ vars.AWS_REGION }}" >/dev/null 2>&1 \
-          || aws ecr create-repository \
-            --repository-name "${{ vars.ECR_REPOSITORY }}" \
-            --region "${{ vars.AWS_REGION }}" \
-            --image-scanning-configuration scanOnPush=true \
-            --image-tag-mutability MUTABLE
-
-      - name: Login to Amazon ECR
-        id: ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Compute image URI
-        id: image
-        run: |
-          URI="${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}"
-          echo "uri=$URI" >> "$GITHUB_OUTPUT"
-
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: |
-            ${{ steps.image.outputs.uri }}:latest
-            ${{ steps.image.outputs.uri }}:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-  # ---------------------------------------------------------------------------
-  # 3. Deploy to EC2 via SSH
-  # ---------------------------------------------------------------------------
   deploy:
-    name: Deploy to EC2
-    runs-on: ubuntu-latest
     needs: build-and-push
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
     steps:
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ vars.AWS_REGION }}
-
-      - name: Get ECR login password
-        id: ecr-pw
-        run: |
-          PW=$(aws ecr get-login-password --region "${{ vars.AWS_REGION }}")
-          echo "::add-mask::$PW"
-          echo "password=$PW" >> "$GITHUB_OUTPUT"
-
-      - name: SSH deploy
-        uses: appleboy/ssh-action@v1.2.0
+      - uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ vars.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
-          port: 22
-          envs: REGISTRY,IMAGE,CONTAINER_PORT,ECR_PASSWORD,HYPERDX_API_KEY
+          envs: REGISTRY,IMAGE,AWS_REGION,CONTAINER_PORT
           script: |
-            set -e
-            echo "$ECR_PASSWORD" | docker login --username AWS --password-stdin "$REGISTRY"
+            aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$REGISTRY"
             docker pull "$IMAGE"
-            docker stop churn-api 2>/dev/null || true
-            docker rm   churn-api 2>/dev/null || true
-            docker run -d \
-              --name churn-api \
-              --restart unless-stopped \
-              -p ${CONTAINER_PORT}:8000 \
-              -e HYPERDX_API_KEY="$HYPERDX_API_KEY" \
-              -e OTEL_SERVICE_NAME=churn-api \
-              "$IMAGE"
-            docker image prune -f
+            docker rm -f churn-api || true
+            docker run -d --name churn-api -p ${CONTAINER_PORT}:8000 "$IMAGE"
         env:
-          REGISTRY: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com
-          IMAGE: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com/${{ vars.ECR_REPOSITORY }}:latest
           CONTAINER_PORT: ${{ vars.CONTAINER_PORT }}
-          ECR_PASSWORD: ${{ steps.ecr-pw.outputs.password }}
-          HYPERDX_API_KEY: ${{ secrets.HYPERDX_API_KEY }}
